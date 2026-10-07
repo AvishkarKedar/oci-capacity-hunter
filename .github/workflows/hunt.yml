@@ -68,8 +68,9 @@ jobs:
             echo "Instance successfully provisioned. Stopping 24/7 hunting chain."
             exit 0
           fi
-          # Check active runs to avoid duplicate scheduling
-          RUNNING_RUNS=$(gh run list --workflow=hunt.yml --status=in_progress --json databaseId -q '. | length')
+          # Check active or queued runs to avoid duplicate scheduling
+          RUNNING_RUNS=$(gh run list --workflow=hunt.yml -L 10 --json status -q '[.[] | select(.status != "completed")] | length' 2>/dev/null || echo 0)
+          RUNNING_RUNS=${RUNNING_RUNS:-0}
           if [ "$RUNNING_RUNS" -le 1 ]; then
             echo "Cycle completed without capacity. Triggering next 5.5-hour hunting cycle..."
             gh workflow run hunt.yml || true

@@ -44,10 +44,12 @@ def verify_endpoints() -> dict:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-    results = {}
+    results = {ep: "Starting up (Cloudflare Tunnel connecting...)" for ep in endpoints}
+    pending = set(endpoints)
+
     log("Verifying ecosystem endpoints via Cloudflare Tunnel...")
-    for ep in endpoints:
-        for attempt in range(1, 13):
+    for attempt in range(1, 13):
+        for ep in list(pending):
             try:
                 req = urllib.request.Request(
                     ep,
@@ -56,13 +58,24 @@ def verify_endpoints() -> dict:
                 with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT_SECONDS, context=ctx) as resp:
                     results[ep] = f"ONLINE (HTTP {resp.status})"
                     log(f"  [+] {ep} is {results[ep]} (attempt {attempt}/12)")
-                    break
+                    pending.remove(ep)
+            except urllib.error.HTTPError as he:
+                # Any HTTP response from origin server (even 401/403/404) indicates service is reachable
+                if he.code < 500:
+                    results[ep] = f"ONLINE (HTTP {he.code})"
+                    log(f"  [+] {ep} is {results[ep]} (attempt {attempt}/12)")
+                    pending.remove(ep)
+                else:
+                    log(f"  [-] {ep} attempt {attempt}/12 server returned HTTP {he.code}")
             except Exception as e:
                 log(f"  [-] {ep} attempt {attempt}/12 status check: {e}")
-                time.sleep(10)
-        else:
-            results[ep] = "Starting up (Cloudflare Tunnel connecting...)"
-            log(f"  [-] {ep} pending: {results[ep]}")
+
+        if not pending:
+            break
+        time.sleep(10)
+
+    for ep in pending:
+        log(f"  [-] {ep} final status: {results[ep]}")
     return results
 
 
@@ -101,6 +114,20 @@ def cancel_and_disable_workflows():
 
 def notify_user_success(instance_id: str, display_name: str, public_ip: str, private_ip: str, endpoints_status: dict, ocpus: float, memory_gb: float):
     """Create a GitHub Issue in the repo with full instance details (triggers instant phone push)."""
+    # Prevent duplicate issue creation if one already exists for this instance
+    try:
+        check_issue = subprocess.run(
+            ["gh", "issue", "list", "--search", instance_id, "--json", "number"],
+            capture_output=True, text=True, check=False
+        )
+        if check_issue.returncode == 0 and check_issue.stdout.strip():
+            existing_issues = json.loads(check_issue.stdout)
+            if existing_issues:
+                log(f"[+] Notification issue already exists (#{existing_issues[0]['number']}) for instance {instance_id}. Skipping creation.")
+                return
+    except Exception as e:
+        log(f"[-] Notice checking existing issues: {e}")
+
     title = f"🎉 Oracle Cloud Instance Successfully Provisioned! (IP: {public_ip})"
     body = f"""## 🚀 Oracle Cloud Instance Provisioned!
 
@@ -133,13 +160,10 @@ def notify_user_success(instance_id: str, display_name: str, public_ip: str, pri
 
 def check_existing_active_instance(compute_client, tenancy_id: str, target_name: str):
     """Verify whether target instance is already PROVISIONING, STARTING, or RUNNING."""
-    try:
-        insts = compute_client.list_instances(compartment_id=tenancy_id).data
-        for i in insts:
-            if i.display_name == target_name and i.lifecycle_state in ["PROVISIONING", "STARTING", "RUNNING"]:
-                return i
-    except Exception as e:
-        log(f"  [Notice] Could not query instances list: {e}")
+    insts = compute_client.list_instances(compartment_id=tenancy_id, display_name=target_name).data
+    for i in insts:
+        if i.display_name == target_name and i.lifecycle_state in ["PROVISIONING", "STARTING", "RUNNING"]:
+            return i
     return None
 
 
@@ -154,7 +178,7 @@ def handle_successful_provision(
     memory_gb: float,
     boot_volume_id: str,
     subnet_id: str
-):
+) -> bool:
     """Post-provisioning handler: poll RUNNING state, fetch IPs, save JSON, verify endpoints, alert, and disable."""
     log("=" * 65)
     log(f"[SUCCESS] Target Instance active: {display_name} ({instance_id})")
@@ -170,28 +194,38 @@ def handle_successful_provision(
             if current_state == "RUNNING":
                 break
             elif current_state in ["TERMINATED", "TERMINATING"]:
-                log(f"  Instance entered unexpected state: {current_state}")
-                break
+                log(f"  [ERROR] Instance entered {current_state} state! Aborting post-provision flow.")
+                return False
         except Exception as e:
             log(f"  Warning polling instance status: {e}")
         time.sleep(10)
 
-    # Fetch Public and Private IP addresses
+    if current_state in ["TERMINATED", "TERMINATING"]:
+        log(f"[-] Cannot proceed: instance is in {current_state} state.")
+        return False
+
+    # Fetch Public and Private IP addresses with retry for VNIC binding
     log("Retrieving VNIC IP addresses...")
     public_ip = "Not Assigned"
     private_ip = "Not Assigned"
-    try:
-        vnics = compute_client.list_vnic_attachments(compartment_id=tenancy_id, instance_id=instance_id).data
-        for v in vnics:
-            vnic = vn_client.get_vnic(v.vnic_id).data
-            if vnic.public_ip:
-                public_ip = vnic.public_ip
-            if vnic.private_ip:
-                private_ip = vnic.private_ip
-        log(f"[+] Public IP:  {public_ip}")
-        log(f"[+] Private IP: {private_ip}")
-    except Exception as e:
-        log(f"Warning fetching VNIC details: {e}")
+    for vnic_poll in range(1, 13):
+        try:
+            vnics = compute_client.list_vnic_attachments(compartment_id=tenancy_id, instance_id=instance_id).data
+            for v in vnics:
+                if v.lifecycle_state == "ATTACHED" or not v.lifecycle_state:
+                    vnic = vn_client.get_vnic(v.vnic_id).data
+                    if vnic.public_ip:
+                        public_ip = vnic.public_ip
+                    if vnic.private_ip:
+                        private_ip = vnic.private_ip
+            if public_ip != "Not Assigned" and private_ip != "Not Assigned":
+                break
+        except Exception as e:
+            log(f"  Warning fetching VNIC details (attempt {vnic_poll}/12): {e}")
+        time.sleep(5)
+
+    log(f"[+] Public IP:  {public_ip}")
+    log(f"[+] Private IP: {private_ip}")
 
     # Allow network settling before endpoint health check
     log("Allowing initial boot settling (15s) before endpoint checks...")
@@ -226,6 +260,7 @@ def handle_successful_provision(
 
     # Cancel other runs and disable workflow
     cancel_and_disable_workflows()
+    return True
 
 
 def main():
@@ -325,27 +360,31 @@ def main():
         attempt += 1
 
         # 1. Verify before EACH attempt whether instance is already running/provisioning
-        existing = check_existing_active_instance(compute_client, tenancy_id, instance_name)
-        if existing:
-            log(f"[!] Active instance '{instance_name}' found in {existing.lifecycle_state} state (ID: {existing.id})! Double-launch prevented.")
-            handle_successful_provision(
-                compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
-                ad, ocpu_count, memory_gb, boot_volume_id, subnet_id
-            )
-            return 0
-
-        # 2. Attempt instance launch
         try:
+            existing = check_existing_active_instance(compute_client, tenancy_id, instance_name)
+            if existing:
+                log(f"[!] Active instance '{instance_name}' found in {existing.lifecycle_state} state (ID: {existing.id})! Double-launch prevented.")
+                if handle_successful_provision(
+                    compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
+                    ad, ocpu_count, memory_gb, boot_volume_id, subnet_id
+                ):
+                    return 0
+                else:
+                    log(f"[!] Active instance '{instance_name}' failed post-provisioning checks. Continuing hunt...")
+
+            # 2. Attempt instance launch
             log(f"Attempt {attempt}: Requesting VM launch ({instance_name}, {ocpu_count} OCPUs, {memory_gb} GB RAM in {ad})...")
             resp = compute_client.launch_instance(launch_details)
             new_inst = resp.data
             consecutive_429 = 0
 
-            handle_successful_provision(
+            if handle_successful_provision(
                 compute_client, vn_client, tenancy_id, new_inst.id, new_inst.display_name,
                 ad, ocpu_count, memory_gb, boot_volume_id, subnet_id
-            )
-            return 0
+            ):
+                return 0
+            else:
+                log(f"[!] Launched instance did not reach RUNNING state. Continuing hunt...")
 
         except oci.exceptions.ServiceError as se:
             if se.status == 429:
