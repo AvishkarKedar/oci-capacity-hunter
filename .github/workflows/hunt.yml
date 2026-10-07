@@ -1,0 +1,72 @@
+name: 24/7 OCI Capacity Hunter
+
+on:
+  schedule:
+    # Run every 5 hours as a standing cron backup
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: oci-hunter
+  cancel-in-progress: false
+
+jobs:
+  hunt:
+    name: OCI A1 Capacity Hunter (5-Hour Cycle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      issues: write
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install OCI SDK
+        run: |
+          python -m pip install --upgrade pip
+          pip install oci
+
+      - name: Configure OCI Credentials
+        env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG_FILE }}
+          OCI_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          echo "$OCI_CONFIG" > ~/.oci/config
+          echo "$OCI_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/config ~/.oci/oci_api_key.pem
+
+      - name: Run 24/7 Capacity Hunter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AVAILABILITY_DOMAIN: ${{ secrets.AVAILABILITY_DOMAIN }}
+          BOOT_VOLUME_ID: ${{ secrets.BOOT_VOLUME_ID }}
+          SUBNET_ID: ${{ secrets.SUBNET_ID }}
+          INSTANCE_NAME: ${{ secrets.INSTANCE_NAME }}
+          OCPU_COUNT: ${{ secrets.OCPU_COUNT }}
+          MEMORY_GB: ${{ secrets.MEMORY_GB }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          python hunter.py
+
+      - name: Seamless 24/7 Chaining (Trigger Next Cycle)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # If instance was already created, don't re-trigger
+          # Check active runs to avoid duplicate scheduling
+          RUNNING_RUNS=$(gh run list --workflow=hunt.yml --status=in_progress --json databaseId -q '. | length')
+          if [ "$RUNNING_RUNS" -le 1 ]; then
+            echo "Triggering next 5-hour hunting cycle..."
+            gh workflow run hunt.yml || true
+          fi
