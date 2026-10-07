@@ -6,7 +6,7 @@ Automated cloud runner that operates **24/7/365** on GitHub Actions to continuou
 
 ## ⚡ How It Works
 1. Operates continuously in GitHub's cloud without touching your local machine, battery, or network bandwidth.
-2. **Intelligent & Rate-Safe Timing**: Checks capacity with a 60-second base interval with randomized jitter (55s – 75s) to avoid robotic pattern detection by Oracle Cloud WAF/edge gateways and prevent HTTP 429 TooManyRequests.
+2. **Intelligent & Rate-Safe Timing**: Checks capacity with a competitive interval with randomized jitter (40s – 60s) to beat competing scripts while avoiding robotic pattern detection by Oracle Cloud WAF/edge gateways and preventing HTTP 429 TooManyRequests.
 3. **Adaptive Backoff**: Implements exponential backoff with jitter on HTTP 429 (120s cooldown baseline).
 4. **Resilient Network I/O**: Configured with 15s network timeout on all API operations, gracefully recovering from DNS or socket drops without crashing.
 5. **Double-Launch Prevention**: Verifies before every single attempt whether the target instance is already in `PROVISIONING`, `STARTING`, or `RUNNING` status.

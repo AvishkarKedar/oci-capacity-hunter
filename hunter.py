@@ -14,11 +14,11 @@ import oci
 # ---------------------------------------------------------
 # Timing & Jitter Configuration
 # ---------------------------------------------------------
-# 60s base interval with randomized jitter (55s - 75s) to avoid
-# robotic pattern detection by Oracle Cloud WAF / edge gateways
-# and eliminate HTTP 429 TooManyRequests.
-JITTER_MIN = 55.0
-JITTER_MAX = 75.0
+# Competitive 40s - 60s interval with randomized jitter (average ~50s)
+# to beat competing free-tier launch scripts while safely evading
+# robotic pattern detection and HTTP 429 TooManyRequests edge rate limits.
+JITTER_MIN = 40.0
+JITTER_MAX = 60.0
 
 # Exponential backoff on HTTP 429 starting at 120s cooldown
 HTTP_429_BASE_COOLDOWN = 120.0
@@ -319,7 +319,7 @@ def main():
     log(f"Availability Domain: {ad}")
     log(f"Boot Volume ID:      {boot_volume_id[:25]}...")
     log(f"Subnet ID:           {subnet_id[:25]}...")
-    log(f"Timing Configuration: 60s base interval with {JITTER_MIN}s-{JITTER_MAX}s randomized jitter")
+    log(f"Timing Configuration: Competitive 40s-60s interval ({JITTER_MIN}s-{JITTER_MAX}s randomized jitter)")
     log(f"Rate-limit handling: Exponential backoff starting at {HTTP_429_BASE_COOLDOWN}s cooldown")
     log(f"API Network Timeout: {NETWORK_TIMEOUT_SECONDS}s with socket drop resiliency")
     log(f"Cycle Max Window:    {MAX_RUNTIME_SECONDS / 3600:.2f} hours")
@@ -400,7 +400,7 @@ def main():
             ):
                 consecutive_429 = 0
                 delay = random.uniform(JITTER_MIN, JITTER_MAX)
-                log(f"Attempt {attempt}: Out of host capacity in {ad}. Retrying in {delay:.1f}s (jittered base ~60s)...")
+                log(f"Attempt {attempt}: Out of host capacity in {ad}. Retrying in {delay:.1f}s (jittered 40s-60s)...")
                 time.sleep(delay)
             else:
                 consecutive_429 = 0
@@ -416,7 +416,7 @@ def main():
 
         except Exception as e:
             consecutive_429 = 0
-            delay = random.uniform(50.0, 65.0)
+            delay = random.uniform(JITTER_MIN, JITTER_MAX)
             log(f"Attempt {attempt}: Unexpected error: {e}. Retrying in {delay:.1f}s...")
             time.sleep(delay)
 

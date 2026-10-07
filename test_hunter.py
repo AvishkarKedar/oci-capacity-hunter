@@ -10,11 +10,13 @@ import oci
 class TestHunter(unittest.TestCase):
 
     def test_jitter_interval_bounds(self):
-        """Verify jitter intervals are within [55.0, 75.0] seconds."""
+        """Verify jitter intervals are within [40.0, 60.0] seconds."""
+        self.assertEqual(hunter.JITTER_MIN, 40.0)
+        self.assertEqual(hunter.JITTER_MAX, 60.0)
         for _ in range(100):
             val = hunter.random.uniform(hunter.JITTER_MIN, hunter.JITTER_MAX)
-            self.assertGreaterEqual(val, 55.0)
-            self.assertLessEqual(val, 75.0)
+            self.assertGreaterEqual(val, 40.0)
+            self.assertLessEqual(val, 60.0)
 
     def test_exponential_backoff_429(self):
         """Verify exponential backoff calculation increases on repeated 429s."""
@@ -298,6 +300,42 @@ class TestHunter(unittest.TestCase):
 
         self.assertEqual(ret, 0)
         mock_compute.return_value.launch_instance.assert_not_called()
+
+    @patch("hunter.time.sleep")
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_capacity_retry_jitter_interval(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time, mock_sleep
+    ):
+        """Verify that an OutOfCapacity error causes hunter to sleep between 40.0 and 60.0 seconds."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        # Cycle: start (0.0), elapsed check 1 (1.0), elapsed check 2 (20000.0 -> exit)
+        mock_time.side_effect = [0.0, 1.0, 20000.0]
+
+        mock_compute.return_value.list_instances.return_value.data = []
+        se = oci.exceptions.ServiceError(
+            status=500, code="OutOfCapacity", headers={}, message="Out of host capacity"
+        )
+        mock_compute.return_value.launch_instance.side_effect = se
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        mock_sleep.assert_called_once()
+        sleep_arg = mock_sleep.call_args[0][0]
+        self.assertGreaterEqual(sleep_arg, 40.0)
+        self.assertLessEqual(sleep_arg, 60.0)
 
 
 if __name__ == "__main__":
