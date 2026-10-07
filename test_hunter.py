@@ -337,6 +337,148 @@ class TestHunter(unittest.TestCase):
         self.assertGreaterEqual(sleep_arg, 40.0)
         self.assertLessEqual(sleep_arg, 60.0)
 
+    @patch("hunter.time.sleep")
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_service_unavailable_fast_retry(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time, mock_sleep
+    ):
+        """Verify that an HTTP 503 Service Unavailable triggers a fast retry (12s-20s)."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        mock_time.side_effect = [0.0, 1.0, 20000.0]
+
+        mock_compute.return_value.list_instances.return_value.data = []
+        se = oci.exceptions.ServiceError(
+            status=503, code="ServiceUnavailable", headers={}, message="Gateway busy"
+        )
+        mock_compute.return_value.launch_instance.side_effect = se
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        mock_sleep.assert_called_once()
+        sleep_arg = mock_sleep.call_args[0][0]
+        self.assertGreaterEqual(sleep_arg, 12.0)
+        self.assertLessEqual(sleep_arg, 20.0)
+
+    @patch("hunter.handle_successful_provision")
+    @patch("hunter.check_existing_active_instance")
+    @patch("hunter.time.sleep")
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_conflict_recovery(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time, mock_sleep, mock_check, mock_handle
+    ):
+        """Verify that an HTTP 409 Conflict checks for active instance and succeeds if found."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        mock_time.side_effect = [0.0, 1.0, 2.0]
+
+        active_inst = MagicMock(id="ocid1.inst.conflict", display_name="Avishkar", lifecycle_state="PROVISIONING")
+        # Pre-flight check: None. After conflict: active_inst found!
+        mock_check.side_effect = [None, active_inst]
+        mock_handle.return_value = True
+
+        se = oci.exceptions.ServiceError(
+            status=409, code="Conflict", headers={}, message="The boot volume is already in use"
+        )
+        mock_compute.return_value.launch_instance.side_effect = se
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        mock_handle.assert_called_once()
+        self.assertEqual(mock_check.call_count, 2)
+
+    @patch("hunter.check_existing_active_instance")
+    @patch("hunter.time.sleep")
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_network_drop_fast_recovery(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time, mock_sleep, mock_check
+    ):
+        """Verify that a socket drop or timeout checks instance status and sleeps with short backoff (5s-10s)."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        mock_time.side_effect = [0.0, 1.0, 20000.0]
+
+        mock_check.return_value = None
+        mock_compute.return_value.launch_instance.side_effect = TimeoutError("Connection reset by peer")
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        mock_sleep.assert_called_once()
+        sleep_arg = mock_sleep.call_args[0][0]
+        self.assertGreaterEqual(sleep_arg, 5.0)
+        self.assertLessEqual(sleep_arg, 10.0)
+
+    @patch("hunter.time.sleep")
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_zero_latency_immediate_launch(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time, mock_sleep
+    ):
+        """Verify that within hunting loop, launch_instance is called immediately without calling list_instances on each retry."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        # Cycle: start (0.0), elapsed check 1 (1.0), elapsed check 2 (2.0), elapsed check 3 (20000.0 -> exit)
+        mock_time.side_effect = [0.0, 1.0, 2.0, 20000.0]
+
+        mock_compute.return_value.list_instances.return_value.data = []
+        se = oci.exceptions.ServiceError(
+            status=500, code="OutOfCapacity", headers={}, message="Out of host capacity"
+        )
+        mock_compute.return_value.launch_instance.side_effect = se
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        # Pre-flight called list_instances once; inside the loop 2 launch attempts occurred with ZERO list_instances calls
+        self.assertEqual(mock_compute.return_value.launch_instance.call_count, 2)
+        self.assertEqual(mock_compute.return_value.list_instances.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

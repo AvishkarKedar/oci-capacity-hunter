@@ -9,7 +9,7 @@ Automated cloud runner that operates **24/7/365** on GitHub Actions to continuou
 2. **Intelligent & Rate-Safe Timing**: Checks capacity with a competitive interval with randomized jitter (40s – 60s) to beat competing scripts while avoiding robotic pattern detection by Oracle Cloud WAF/edge gateways and preventing HTTP 429 TooManyRequests.
 3. **Adaptive Backoff**: Implements exponential backoff with jitter on HTTP 429 (120s cooldown baseline).
 4. **Resilient Network I/O**: Configured with 15s network timeout on all API operations, gracefully recovering from DNS or socket drops without crashing.
-5. **Double-Launch Prevention**: Verifies before every single attempt whether the target instance is already in `PROVISIONING`, `STARTING`, or `RUNNING` status.
+5. **High-Speed Zero-Latency Launch & Double-Launch Protection**: Runs pre-flight verification at startup, dispatches `launch_instance` with zero added roundtrip latency the millisecond each sleep interval expires to beat competing bots, auto-recovers from HTTP 409 resource conflicts and HTTP 502/503 gateway surges, and runs periodic background sync.
 6. The moment an A1 slot is secured in `PHX-AD-2`:
    - Instantly locks in the VM shape (**2.0 OCPUs, 12.0 GB RAM**).
    - Attaches existing **200 GB Boot Volume**.

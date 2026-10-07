@@ -158,9 +158,10 @@ def notify_user_success(instance_id: str, display_name: str, public_ip: str, pri
         log(f"[-] Could not create GitHub issue notification: {e}")
 
 
-def check_existing_active_instance(compute_client, tenancy_id: str, target_name: str):
+def check_existing_active_instance(compute_client, tenancy_id: str, target_name: str, compartment_id: str = None):
     """Verify whether target instance is already PROVISIONING, STARTING, or RUNNING."""
-    insts = compute_client.list_instances(compartment_id=tenancy_id, display_name=target_name).data
+    comp_id = compartment_id or tenancy_id
+    insts = compute_client.list_instances(compartment_id=comp_id, display_name=target_name).data
     for i in insts:
         if i.display_name == target_name and i.lifecycle_state in ["PROVISIONING", "STARTING", "RUNNING"]:
             return i
@@ -177,9 +178,11 @@ def handle_successful_provision(
     ocpu_count: float,
     memory_gb: float,
     boot_volume_id: str,
-    subnet_id: str
+    subnet_id: str,
+    compartment_id: str = None
 ) -> bool:
     """Post-provisioning handler: poll RUNNING state, fetch IPs, save JSON, verify endpoints, alert, and disable."""
+    comp_id = compartment_id or tenancy_id
     log("=" * 65)
     log(f"[SUCCESS] Target Instance active: {display_name} ({instance_id})")
     log("=" * 65)
@@ -210,7 +213,7 @@ def handle_successful_provision(
     private_ip = "Not Assigned"
     for vnic_poll in range(1, 13):
         try:
-            vnics = compute_client.list_vnic_attachments(compartment_id=tenancy_id, instance_id=instance_id).data
+            vnics = compute_client.list_vnic_attachments(compartment_id=comp_id, instance_id=instance_id).data
             for v in vnics:
                 if v.lifecycle_state == "ATTACHED" or not v.lifecycle_state:
                     vnic = vn_client.get_vnic(v.vnic_id).data
@@ -286,6 +289,7 @@ def main():
     vn_client = oci.core.VirtualNetworkClient(config, timeout=timeout_tuple)
 
     tenancy_id = config["tenancy"]
+    compartment_id = os.environ.get("COMPARTMENT_ID") or tenancy_id
 
     # Target instance parameters
     ad = os.environ.get("AVAILABILITY_DOMAIN") or "FbyS:PHX-AD-2"
@@ -326,7 +330,7 @@ def main():
 
     launch_details = oci.core.models.LaunchInstanceDetails(
         availability_domain=ad,
-        compartment_id=tenancy_id,
+        compartment_id=compartment_id,
         display_name=instance_name,
         shape="VM.Standard.A1.Flex",
         shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
@@ -351,6 +355,22 @@ def main():
     consecutive_429 = 0
     start_time = time.time()
 
+    # Pre-flight check: verify before entering hunt loop if instance already exists
+    log("Pre-flight check: Verifying whether instance already exists...")
+    try:
+        existing = check_existing_active_instance(compute_client, tenancy_id, instance_name, compartment_id=compartment_id)
+        if existing:
+            log(f"[!] Active instance '{instance_name}' found in {existing.lifecycle_state} state (ID: {existing.id})! Double-launch prevented.")
+            if handle_successful_provision(
+                compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
+                ad, ocpu_count, memory_gb, boot_volume_id, subnet_id, compartment_id=compartment_id
+            ):
+                return 0
+            else:
+                log(f"[!] Active instance '{instance_name}' failed post-provisioning checks. Proceeding to hunt...")
+    except Exception as e:
+        log(f"[-] Pre-flight instance check warning: {e}. Proceeding to hunt...")
+
     while True:
         elapsed = time.time() - start_time
         if elapsed > MAX_RUNTIME_SECONDS:
@@ -359,20 +379,22 @@ def main():
 
         attempt += 1
 
-        # 1. Verify before EACH attempt whether instance is already running/provisioning
-        try:
-            existing = check_existing_active_instance(compute_client, tenancy_id, instance_name)
-            if existing:
-                log(f"[!] Active instance '{instance_name}' found in {existing.lifecycle_state} state (ID: {existing.id})! Double-launch prevented.")
-                if handle_successful_provision(
-                    compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
-                    ad, ocpu_count, memory_gb, boot_volume_id, subnet_id
-                ):
-                    return 0
-                else:
-                    log(f"[!] Active instance '{instance_name}' failed post-provisioning checks. Continuing hunt...")
+        # Periodic background sync (every 50 attempts, ~40 mins) to detect out-of-band provisioning
+        if attempt > 1 and attempt % 50 == 0:
+            try:
+                existing = check_existing_active_instance(compute_client, tenancy_id, instance_name, compartment_id=compartment_id)
+                if existing:
+                    log(f"[!] Periodic sync: active instance '{instance_name}' found in {existing.lifecycle_state} state (ID: {existing.id})!")
+                    if handle_successful_provision(
+                        compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
+                        ad, ocpu_count, memory_gb, boot_volume_id, subnet_id, compartment_id=compartment_id
+                    ):
+                        return 0
+            except Exception as e:
+                log(f"[-] Periodic instance check warning: {e}")
 
-            # 2. Attempt instance launch
+        # Attempt instance launch IMMEDIATELY upon timer wake (zero added latency, beating competing scripts)
+        try:
             log(f"Attempt {attempt}: Requesting VM launch ({instance_name}, {ocpu_count} OCPUs, {memory_gb} GB RAM in {ad})...")
             resp = compute_client.launch_instance(launch_details)
             new_inst = resp.data
@@ -380,7 +402,7 @@ def main():
 
             if handle_successful_provision(
                 compute_client, vn_client, tenancy_id, new_inst.id, new_inst.display_name,
-                ad, ocpu_count, memory_gb, boot_volume_id, subnet_id
+                ad, ocpu_count, memory_gb, boot_volume_id, subnet_id, compartment_id=compartment_id
             ):
                 return 0
             else:
@@ -393,10 +415,32 @@ def main():
                 cooldown = min(HTTP_429_MAX_COOLDOWN, base) + random.uniform(5.0, 15.0)
                 log(f"Attempt {attempt}: Rate limit encountered (HTTP 429). Consecutive: {consecutive_429}. Backoff cooldown: {cooldown:.1f}s...")
                 time.sleep(cooldown)
-            elif se.status == 500 and (
-                "capacity" in str(se.message).lower()
+            elif se.status == 409 or se.code in ["Conflict", "LimitExceeded"] or "already in use" in str(se.message).lower():
+                # Conflict / volume in use: verify if instance was successfully launched in background
+                log(f"Attempt {attempt}: Resource state / conflict detected ({se.code}): {se.message}. Verifying instance status...")
+                try:
+                    existing = check_existing_active_instance(compute_client, tenancy_id, instance_name, compartment_id=compartment_id)
+                    if existing and handle_successful_provision(
+                        compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
+                        ad, ocpu_count, memory_gb, boot_volume_id, subnet_id, compartment_id=compartment_id
+                    ):
+                        return 0
+                except Exception as check_err:
+                    log(f"[-] Error checking instance after conflict: {check_err}")
+                delay = random.uniform(JITTER_MIN, JITTER_MAX)
+                log(f"Retrying in {delay:.1f}s (jittered 40s-60s)...")
+                time.sleep(delay)
+            elif se.status in [502, 503]:
+                # Transient gateway congestion during capacity release: fast retry (12s-20s)
+                consecutive_429 = 0
+                delay = random.uniform(12.0, 20.0)
+                log(f"Attempt {attempt}: Gateway congestion / Service Unavailable (HTTP {se.status}). Fast retry in {delay:.1f}s...")
+                time.sleep(delay)
+            elif (
+                se.status == 500
+                or "capacity" in str(se.message).lower()
                 or "capacity" in str(se.code).lower()
-                or se.code in ["InternalError", "LimitExceeded"]
+                or se.code in ["OutOfCapacity", "InternalError"]
             ):
                 consecutive_429 = 0
                 delay = random.uniform(JITTER_MIN, JITTER_MAX)
@@ -408,10 +452,20 @@ def main():
                 log(f"Attempt {attempt}: OCI Service Error {se.status} ({se.code}): {se.message}. Retrying in {delay:.1f}s...")
                 time.sleep(delay)
 
-        except (oci.exceptions.ConnectTimeout, oci.exceptions.RequestException, socket.error, TimeoutError, urllib.error.URLError) as ne:
+        except (oci.exceptions.ConnectTimeout, oci.exceptions.RequestException, socket.error, TimeoutError, urllib.error.URLError, OSError, ssl.SSLError) as ne:
             consecutive_429 = 0
-            delay = random.uniform(25.0, 35.0)
-            log(f"Attempt {attempt}: Network / DNS / Socket drop or timeout (15s limit): {ne}. Retrying in {delay:.1f}s...")
+            log(f"Attempt {attempt}: Network / Socket drop or timeout (15s limit): {ne}. Verifying instance status before retry...")
+            try:
+                existing = check_existing_active_instance(compute_client, tenancy_id, instance_name, compartment_id=compartment_id)
+                if existing and handle_successful_provision(
+                    compute_client, vn_client, tenancy_id, existing.id, existing.display_name,
+                    ad, ocpu_count, memory_gb, boot_volume_id, subnet_id, compartment_id=compartment_id
+                ):
+                    return 0
+            except Exception:
+                pass
+            delay = random.uniform(5.0, 10.0)
+            log(f"Retrying in {delay:.1f}s...")
             time.sleep(delay)
 
         except Exception as e:
