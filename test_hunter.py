@@ -239,6 +239,66 @@ class TestHunter(unittest.TestCase):
         self.assertIn("Starting up", results["https://os.avishkark.in"])
         self.assertIn("Starting up", results["https://vpn.avishkark.in"])
 
+    @patch("hunter.handle_successful_provision")
+    @patch("hunter.check_existing_active_instance")
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_preflight_double_launch_protection(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time, mock_check, mock_handle
+    ):
+        """Verify that main() immediately exits 0 via handle_successful_provision without calling launch_instance."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        mock_time.side_effect = [100.0, 101.0, 102.0]
+
+        mock_active = MagicMock()
+        mock_active.id = "ocid1.inst.already_running"
+        mock_active.display_name = "Avishkar"
+        mock_active.lifecycle_state = "RUNNING"
+        mock_check.return_value = mock_active
+        mock_handle.return_value = True
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        mock_handle.assert_called_once()
+        mock_compute.return_value.launch_instance.assert_not_called()
+
+    @patch("hunter.time.time")
+    @patch("oci.core.VirtualNetworkClient")
+    @patch("oci.core.ComputeClient")
+    @patch("oci.config.validate_config")
+    @patch("oci.config.from_file")
+    @patch("os.path.exists")
+    def test_main_cycle_timeout(
+        self, mock_exists, mock_from_file, mock_validate, mock_compute, mock_vn, mock_time
+    ):
+        """Verify that main() cleanly exits 0 when max cycle window is reached."""
+        mock_exists.return_value = True
+        mock_from_file.return_value = {"tenancy": "ocid1.tenancy.test"}
+        mock_time.side_effect = [0.0, 20000.0]
+
+        env_vars = {
+            "SSH_PUBLIC_KEY": "ssh-ed25519 AAAAC3 test-key",
+            "BOOT_VOLUME_ID": "ocid1.bootvolume.test",
+            "SUBNET_ID": "ocid1.subnet.test"
+        }
+        with patch.dict(os.environ, env_vars):
+            ret = hunter.main()
+
+        self.assertEqual(ret, 0)
+        mock_compute.return_value.launch_instance.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
