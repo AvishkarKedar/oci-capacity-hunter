@@ -2,7 +2,7 @@ name: 24/7 OCI Capacity Hunter
 
 on:
   schedule:
-    # Run every 5 hours as a standing cron backup
+    # Run every 5 hours as a standing cron backup / safety net
     - cron: '0 */5 * * *'
   workflow_dispatch:
 
@@ -12,9 +12,9 @@ concurrency:
 
 jobs:
   hunt:
-    name: OCI A1 Capacity Hunter (5-Hour Cycle)
+    name: OCI A1 Capacity Hunter (5.5-Hour Cycle)
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 360 # 6-hour execution limit on standard runner
     permissions:
       issues: write
       contents: write
@@ -30,10 +30,10 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Install OCI SDK
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install oci
+          pip install -r requirements.txt
 
       - name: Configure OCI Credentials
         env:
@@ -48,6 +48,7 @@ jobs:
       - name: Run 24/7 Capacity Hunter
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
           AVAILABILITY_DOMAIN: ${{ secrets.AVAILABILITY_DOMAIN }}
           BOOT_VOLUME_ID: ${{ secrets.BOOT_VOLUME_ID }}
           SUBNET_ID: ${{ secrets.SUBNET_ID }}
@@ -59,14 +60,19 @@ jobs:
           python hunter.py
 
       - name: Seamless 24/7 Chaining (Trigger Next Cycle)
-        if: always()
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # If instance was already created, don't re-trigger
+          if [ -f instance_info.json ]; then
+            echo "Instance successfully provisioned. Stopping 24/7 hunting chain."
+            exit 0
+          fi
           # Check active runs to avoid duplicate scheduling
           RUNNING_RUNS=$(gh run list --workflow=hunt.yml --status=in_progress --json databaseId -q '. | length')
           if [ "$RUNNING_RUNS" -le 1 ]; then
-            echo "Triggering next 5-hour hunting cycle..."
+            echo "Cycle completed without capacity. Triggering next 5.5-hour hunting cycle..."
             gh workflow run hunt.yml || true
+          else
+            echo "Another run is already active or in progress ($RUNNING_RUNS). Skipping dispatch."
           fi

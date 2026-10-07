@@ -5,14 +5,19 @@ Automated cloud runner that operates **24/7/365** on GitHub Actions to continuou
 ---
 
 ## ⚡ How It Works
-1. Runs continuously in GitHub's cloud without touching your local computer, battery, or network.
-2. Checks capacity with an optimal 40-second interval (with automatic 75-second backoff on HTTP 429 rate limits).
-3. The moment an A1 slot is freed up by another user in `PHX-AD-2`:
-   - Instantly locks in the VM shape (**2 OCPUs, 12 GB RAM**).
-   - Attaches your existing **200 GB Boot Volume**.
-   - Captures the newly assigned Public IP and Private IP.
+1. Operates continuously in GitHub's cloud without touching your local machine, battery, or network bandwidth.
+2. **Intelligent & Rate-Safe Timing**: Checks capacity with a 60-second base interval with randomized jitter (55s – 75s) to avoid robotic pattern detection by Oracle Cloud WAF/edge gateways and prevent HTTP 429 TooManyRequests.
+3. **Adaptive Backoff**: Implements exponential backoff with jitter on HTTP 429 (120s cooldown baseline).
+4. **Resilient Network I/O**: Configured with 15s network timeout on all API operations, gracefully recovering from DNS or socket drops without crashing.
+5. **Double-Launch Prevention**: Verifies before every single attempt whether the target instance is already in `PROVISIONING`, `STARTING`, or `RUNNING` status.
+6. The moment an A1 slot is secured in `PHX-AD-2`:
+   - Instantly locks in the VM shape (**2.0 OCPUs, 12.0 GB RAM**).
+   - Attaches existing **200 GB Boot Volume**.
+   - Polls until the VM enters `RUNNING` status.
+   - Fetches assigned Public IP and Private IP, saving full details to `instance_info.json`.
    - Tests and verifies `https://os.avishkark.in` and `https://vpn.avishkark.in`.
-   - Automatically opens a **GitHub Issue** alert in this repository (which triggers an instant push notification and email to your phone!).
+   - Opens a **GitHub Issue** alert in this repository (triggering an instant push notification to your phone).
+   - Automatically cancels active runs and disables future workflows to preserve resources.
 
 ---
 
@@ -26,4 +31,4 @@ Automated cloud runner that operates **24/7/365** on GitHub Actions to continuou
 To track live progress in real-time:
 1. Open this repository on GitHub (or the GitHub mobile app).
 2. Click on the **Actions** tab at the top.
-3. Click the active workflow run to watch live timestamps and attempt counts.
+3. Click the active workflow run to watch live timestamps, attempt logs, and status updates.
