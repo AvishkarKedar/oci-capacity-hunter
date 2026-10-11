@@ -296,8 +296,8 @@ def main():
     boot_volume_id = os.environ.get("BOOT_VOLUME_ID") or "ocid1.bootvolume.oc1.phx.abyhqljsm2i5ikkuzg25z74cq7walpxnb2fc37tnvs42jucrsi6hkzcd5g4q"
     subnet_id = os.environ.get("SUBNET_ID") or "ocid1.subnet.oc1.phx.aaaaaaaag2vh7buztgwuj242kx7v7ls62nuxdrh6zuupwaiiypkaz3i6o5mq"
     instance_name = os.environ.get("INSTANCE_NAME") or "Avishkar"
-    ocpu_count = float(os.environ.get("OCPU_COUNT") or 2.0)
-    memory_gb = float(os.environ.get("MEMORY_GB") or 12.0)
+    ocpu_count = float(os.environ.get("OCPU_COUNT") or 1.0)
+    memory_gb = float(os.environ.get("MEMORY_GB") or 6.0)
     ssh_key = os.environ.get("SSH_PUBLIC_KEY")
 
     if not ssh_key:
